@@ -1,22 +1,24 @@
 pipeline {
   agent any
-
-  options {
-    disableConcurrentBuilds()
-    skipDefaultCheckout(true)
-  }
+  options { disableConcurrentBuilds() }
 
   parameters {
-    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag to deploy to DEV (required)')
+    string(
+      name: 'IMAGE_TAG',
+      defaultValue: 'KEEP_CURRENT',
+      description: 'Docker image tag to deploy to DEV. Use KEEP_CURRENT to apply Helm values without changing the image.'
+    )
   }
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
+    // DEV target
     NAMESPACE  = "dev"
     RELEASE    = "task-service"
     IMAGE_REPO = "tsingh38/taskhub"
 
+    // chart lives in infra repo
     CHART_DIR  = "infra/helm/charts/task-service"
     VALUES_DEV = "infra/helm/values/task-service/values-dev.yaml"
   }
@@ -30,16 +32,20 @@ pipeline {
     stage('Validate') {
       steps {
         script {
-          if (!params.IMAGE_TAG?.trim()) error("IMAGE_TAG is required (example: 0.1.1-SNAPSHOT-12)")
-          env.IMAGE_TAG = params.IMAGE_TAG.trim()
-          echo "Deploy DEV with IMAGE_TAG=${env.IMAGE_TAG}"
+          // Webhook-triggered builds often pass IMAGE_TAG as empty -> treat as KEEP_CURRENT
+          if (!params.IMAGE_TAG?.trim()) {
+            env.EFFECTIVE_TAG = "KEEP_CURRENT"
+          } else {
+            env.EFFECTIVE_TAG = params.IMAGE_TAG.trim()
+          }
+          echo "Deploy DEV: namespace=${env.NAMESPACE}, release=${env.RELEASE}, IMAGE_TAG=${env.EFFECTIVE_TAG}"
         }
 
         sh '''
           set -eu
           test -f "$KUBECONFIG"
           test -d "$CHART_DIR"
-          test -f "$WORKSPACE/$VALUES_DEV"
+          test -f "$VALUES_DEV"
         '''
       }
     }
@@ -47,17 +53,28 @@ pipeline {
     stage('Helm Upgrade DEV (task-service only)') {
       steps {
         dir("${env.CHART_DIR}") {
-          sh '''
-            set -eu
-            export KUBECONFIG="$KUBECONFIG"
+          script {
+            def cmd = """
+              set -eu
+              export KUBECONFIG="${env.KUBECONFIG}"
 
-            helm upgrade --install "$RELEASE" . \
-              -n "$NAMESPACE" --create-namespace \
-              -f "$WORKSPACE/$VALUES_DEV" \
-              --set image.repository="$IMAGE_REPO" \
-              --set image.tag="$IMAGE_TAG" \
-              --wait --timeout 7m --atomic
-          '''
+              helm upgrade --install "${env.RELEASE}" . \\
+                -n "${env.NAMESPACE}" --create-namespace \\
+                -f "${env.WORKSPACE}/${env.VALUES_DEV}" \\
+                --wait --timeout 7m --atomic
+            """.stripIndent()
+
+            if (env.EFFECTIVE_TAG != "KEEP_CURRENT") {
+              cmd += """
+                --set image.repository="${env.IMAGE_REPO}" \\
+                --set image.tag="${env.EFFECTIVE_TAG}"
+              """.stripIndent()
+            } else {
+              cmd += "\n# KEEP_CURRENT: not overriding image.tag\n"
+            }
+
+            sh cmd
+          }
         }
       }
     }
@@ -67,16 +84,22 @@ pipeline {
         sh '''
           set -eu
           export KUBECONFIG="$KUBECONFIG"
+
+          echo "DEV Pods:"
           kubectl -n dev get pods -o wide || true
+          echo ""
+          echo "DEV Service:"
           kubectl -n dev get svc task-service -o wide || true
-          helm -n dev status task-service | sed -n '1,80p' || true
+          echo ""
+          echo "DEV Helm Release:"
+          helm -n dev status task-service | sed -n '1,60p' || true
         '''
       }
     }
   }
 
   post {
-    success { echo "DEV Deploy Success (IMAGE_TAG=${params.IMAGE_TAG})" }
-    failure { echo "DEV Deploy Failed (IMAGE_TAG=${params.IMAGE_TAG})" }
+    success { echo "DEV Deploy Success (IMAGE_TAG=${env.EFFECTIVE_TAG})" }
+    failure { echo "DEV Deploy Failed (IMAGE_TAG=${env.EFFECTIVE_TAG})" }
   }
 }
