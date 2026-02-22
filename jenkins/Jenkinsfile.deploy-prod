@@ -18,16 +18,21 @@ pipeline {
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
-    CHART_DIR   = "infra/helm/charts/task-service"
-    VALUES_PROD = "infra/helm/charts/task-service/values-prod.yaml"
-
-    NAMESPACE = "prod"
-    RELEASE   = "task-service"
-
+    // PROD target
+    NAMESPACE  = "prod"
+    RELEASE    = "task-service"
     IMAGE_REPO = "tsingh38/taskhub"
+
+    // chart lives in infra repo
+    CHART_DIR  = "infra/helm/charts/task-service"
+    VALUES_REL = "values-prod.yaml"
   }
 
   stages {
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Validate') {
       steps {
@@ -43,15 +48,11 @@ pipeline {
 
         sh '''
           set -eu
-          export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
-          test -f "$WORKSPACE/$VALUES_PROD"
+          test -d "$CHART_DIR"
+          test -f "$CHART_DIR/$VALUES_REL"
         '''
       }
-    }
-
-    stage('Checkout') {
-      steps { checkout scm }
     }
 
     stage('Helm Upgrade PROD (task-service only)') {
@@ -63,7 +64,7 @@ pipeline {
 
             helm upgrade --install "$RELEASE" . \
               -n "$NAMESPACE" --create-namespace \
-              -f "$WORKSPACE/$VALUES_PROD" \
+              -f "$VALUES_REL" \
               --set image.repository="$IMAGE_REPO" \
               --set image.tag="$RELEASE_TAG" \
               --wait --timeout 7m --atomic

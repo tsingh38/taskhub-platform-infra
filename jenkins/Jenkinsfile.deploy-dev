@@ -3,35 +3,47 @@ pipeline {
   options { disableConcurrentBuilds() }
 
   parameters {
-    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag to deploy to DEV (required)')
+    string(
+      name: 'IMAGE_TAG',
+      defaultValue: '',
+      description: 'Docker image tag to deploy to DEV (required). Example: 0.1.1-SNAPSHOT-5'
+    )
   }
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    // DEV target
     NAMESPACE  = "dev"
     RELEASE    = "task-service"
     IMAGE_REPO = "tsingh38/taskhub"
 
+    // chart lives in infra repo
     CHART_DIR  = "infra/helm/charts/task-service"
-    VALUES_DEV = "infra/helm/charts/task-service/values-dev.yaml"
+    VALUES_REL = "values-dev.yaml"
   }
 
   stages {
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
     stage('Validate') {
       steps {
         script {
-          if (!params.IMAGE_TAG?.trim()) error("IMAGE_TAG is required")
+          if (!params.IMAGE_TAG?.trim()) {
+            error("IMAGE_TAG is required")
+          }
         }
         sh '''
           set -eu
-          export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
-          test -f "$WORKSPACE/$VALUES_DEV"
+          test -d "$CHART_DIR"
+          test -f "$CHART_DIR/$VALUES_REL"
         '''
       }
     }
-
-    stage('Checkout') { steps { checkout scm } }
 
     stage('Helm Upgrade DEV (task-service only)') {
       steps {
@@ -42,7 +54,7 @@ pipeline {
 
             helm upgrade --install "$RELEASE" . \
               -n "$NAMESPACE" --create-namespace \
-              -f "$WORKSPACE/$VALUES_DEV" \
+              -f "$VALUES_REL" \
               --set image.repository="$IMAGE_REPO" \
               --set image.tag="$IMAGE_TAG" \
               --wait --timeout 7m --atomic
@@ -50,10 +62,28 @@ pipeline {
         }
       }
     }
+
+    stage('Post-Deploy Checks') {
+      steps {
+        sh '''
+          set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
+          echo "Pods:"
+          kubectl -n dev get pods -o wide || true
+          echo ""
+          echo "Service:"
+          kubectl -n dev get svc task-service -o wide || true
+          echo ""
+          echo "Helm status:"
+          helm -n dev status task-service | sed -n '1,60p' || true
+        '''
+      }
+    }
   }
 
   post {
-    success { echo "DEV Deploy Success" }
+    success { echo "DEV Deploy Success (IMAGE_TAG=${params.IMAGE_TAG})" }
     failure { echo "DEV Deploy Failed" }
   }
 }
