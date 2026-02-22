@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: tsingh38/taskhub
-  tag: "latest"
+  tag: ""
   pullPolicy: IfNotPresent
 
 service:
