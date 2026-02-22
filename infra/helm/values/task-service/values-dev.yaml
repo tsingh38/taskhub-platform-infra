@@ -1,0 +1,34 @@
+replicaCount: 2
+
+image:
+  pullPolicy: Always
+
+service:
+  type: NodePort
+  port: 80
+  targetPort: 8080
+  nodePort: 30080
+
+env:
+  SPRING_PROFILES_ACTIVE: k8s
+  DB_URL: jdbc:postgresql://postgres-postgresql.dev.svc.cluster.local:5432/taskdb
+
+
+ingress:
+  enabled: true
+  host: task-service.dev.local
+
+# Redundant if identical to values.yaml
+probes:
+  liveness:
+    enabled: true
+    path: /actuator/health/liveness
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /actuator/health/readiness
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3

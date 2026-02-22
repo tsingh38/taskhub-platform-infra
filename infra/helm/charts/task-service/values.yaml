@@ -1,0 +1,33 @@
+replicaCount: 1
+
+image:
+  repository: tsingh38/taskhub
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+
+env:
+  SPRING_PROFILES_ACTIVE: default
+
+probes:
+  liveness:
+    enabled: true
+    path: /actuator/health/liveness
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /actuator/health/readiness
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+
+resources: {}

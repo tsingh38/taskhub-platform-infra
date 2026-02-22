@@ -1,0 +1,33 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-alerts
+  labels:
+    release: monitoring
+    app: {{ .Release.Name }}
+spec:
+  groups:
+    - name: task-service.rules
+      rules:
+        - alert: TaskCreationSlow
+          expr: histogram_quantile(0.95, sum(rate(api_tasks_create_seconds_bucket[5m])) by (le)) > 1.0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Task Creation is slow (> 1s)"
+            # FIX: Use {{ "{{" }} to tell Helm "Don't touch this!"
+            description: "95th percentile latency is {{ "{{" }} $value {{ "}}" }}s."
+
+        - alert: HighErrorRate
+          expr: |
+            sum(rate(api_errors_total[5m])) 
+            / 
+            sum(rate(http_server_requests_seconds_count[5m])) > 0.05
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High Failure Rate detected"
+            # FIX: Same here
+            description: "Error rate is {{ "{{" }} $value | humanizePercentage {{ "}}" }}."

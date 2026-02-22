@@ -1,0 +1,124 @@
+pipeline {
+  agent any
+
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+  }
+
+  parameters {
+    booleanParam(
+      name: 'DEPLOY_PROD',
+      defaultValue: false,
+      description: 'If true, deploys PROD infra. If false, deploys DEV infra.'
+    )
+    booleanParam(
+      name: 'CONFIRM_PROD',
+      defaultValue: false,
+      description: 'Safety switch: must be TRUE when DEPLOY_PROD=true.'
+    )
+  }
+
+  environment {
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    TF_STATE_MONITORING = "/var/lib/jenkins/terraform-state/taskhub-monitoring/terraform.tfstate"
+    TF_STATE_DEV        = "/var/lib/jenkins/terraform-state/taskhub-dev/terraform.tfstate"
+    TF_STATE_PROD       = "/var/lib/jenkins/terraform-state/taskhub-prod/terraform.tfstate"
+  }
+
+  stages {
+
+    stage('Checkout') { steps { checkout scm } }
+
+    stage('Validate') {
+      steps {
+        script {
+          sh 'test -f "$KUBECONFIG"'
+          if (params.DEPLOY_PROD && !params.CONFIRM_PROD) {
+            error("Blocked: set CONFIRM_PROD=true when DEPLOY_PROD=true.")
+          }
+          echo "MODE=" + (params.DEPLOY_PROD ? "PROD" : "DEV")
+        }
+      }
+    }
+
+    stage('Apply MONITORING (always)') {
+      steps {
+        dir('infra/terraform/monitoring') {
+          withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+            sh '''
+              set -eu
+              mkdir -p "$(dirname "$TF_STATE_MONITORING")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_slack_webhook_url="$SLACK_WEBHOOK"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_MONITORING"
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Apply DEV infra') {
+      when { expression { return !params.DEPLOY_PROD } }
+      steps {
+        dir('infra/terraform/dev') {
+          withCredentials([
+            string(credentialsId: 'db-user', variable: 'DB_USER_DEV'),
+            string(credentialsId: 'db-password', variable: 'DB_PASSWORD_DEV')
+          ]) {
+            sh '''
+              set -eu
+              mkdir -p "$(dirname "$TF_STATE_DEV")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_dev="$DB_USER_DEV"
+              export TF_VAR_db_password_dev="$DB_PASSWORD_DEV"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_DEV"
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Apply PROD infra') {
+      when { expression { return params.DEPLOY_PROD } }
+      steps {
+        dir('infra/terraform/prod') {
+          withCredentials([
+            string(credentialsId: 'db-user-prod', variable: 'DB_USER_PROD'),
+            string(credentialsId: 'db-password-prod', variable: 'DB_PASSWORD_PROD')
+          ]) {
+            sh '''
+              set -eu
+              mkdir -p "$(dirname "$TF_STATE_PROD")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_prod="$DB_USER_PROD"
+              export TF_VAR_db_password_prod="$DB_PASSWORD_PROD"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_PROD"
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Post Checks') {
+      steps {
+        sh '''
+          set -eu
+          echo "Monitoring:"; kubectl -n monitoring get pods,svc || true
+          echo "Dev:";        kubectl -n dev get pods,svc || true
+          echo "Prod:";       kubectl -n prod get pods,svc || true
+        '''
+      }
+    }
+  }
+}

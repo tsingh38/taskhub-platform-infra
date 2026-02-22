@@ -8,50 +8,24 @@ pipeline {
   parameters {
     string(
       name: 'IMAGE_TAG',
-      defaultValue: 'KEEP_CURRENT',
-      description: 'Docker image tag to deploy to DEV. Use KEEP_CURRENT to apply infra changes without changing the app image.'
-    )
-
-    booleanParam(
-      name: 'APPLY_TASK_SERVICE',
-      defaultValue: true,
-      description: 'Apply task-service Helm release (always recommended).'
-    )
-
-    booleanParam(
-      name: 'APPLY_POSTGRES',
-      defaultValue: false,
-      description: 'Apply Postgres Helm release (only if postgres values changed).'
-    )
-
-    booleanParam(
-      name: 'APPLY_SERVICE_MONITOR',
-      defaultValue: false,
-      description: 'Apply ServiceMonitor manifest (only if servicemonitor yaml changed).'
+      defaultValue: '',
+      description: 'Docker image tag to deploy to DEV (e.g., 0.1.0-SNAPSHOT-58). Required.'
     )
   }
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
-    // ---- DEV namespace ----
+    // DEV target
     NAMESPACE = "dev"
+    RELEASE   = "task-service"
 
-    // ---- task-service chart ----
-    TASK_CHART_DIR   = "infra/helm/charts/task-service"
-    TASK_VALUES_DEV  = "infra/helm/charts/task-service/values-dev.yaml"
-    TASK_RELEASE     = "task-service"
-    IMAGE_REPO       = "tsingh38/taskhub"
+    // Task-service chart + values (UPDATE these paths to your infra repo layout)
+    TASK_CHART_DIR  = "infra/helm/charts/task-service"
+    TASK_VALUES_DEV = "infra/helm/charts/task-service/values-dev.yaml"
 
-    // ---- postgres (bitnami) ----
-    POSTGRES_RELEASE    = "postgres"
-    POSTGRES_REPO_NAME  = "bitnami"
-    POSTGRES_REPO_URL   = "https://charts.bitnami.com/bitnami"
-    POSTGRES_CHART      = "bitnami/postgresql"
-    POSTGRES_VALUES_DEV = "infra/helm/values/postgres/values.dev.yaml"
-
-    // ---- ServiceMonitor manifest ----
-    SM_DEV_MANIFEST = "infra/monitoring/servicemonitors/task-service-dev.yaml"
+    // Image repo
+    IMAGE_REPO = "tsingh38/taskhub"
   }
 
   stages {
@@ -60,18 +34,15 @@ pipeline {
       steps {
         script {
           if (!params.IMAGE_TAG?.trim()) {
-            error("IMAGE_TAG is required. Use KEEP_CURRENT to apply infra changes without changing the image.")
+            error("IMAGE_TAG is required (example: 0.1.0-SNAPSHOT-58).")
           }
+          echo "Deploying DEV: ns=${env.NAMESPACE}, release=${env.RELEASE}, image=${env.IMAGE_REPO}:${params.IMAGE_TAG}"
         }
+
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
-          echo "DEV Deploy:"
-          echo "  namespace=${NAMESPACE}"
-          echo "  IMAGE_TAG=${IMAGE_TAG}"
-          echo "  APPLY_TASK_SERVICE=${APPLY_TASK_SERVICE}"
-          echo "  APPLY_POSTGRES=${APPLY_POSTGRES}"
-          echo "  APPLY_SERVICE_MONITOR=${APPLY_SERVICE_MONITOR}"
         '''
       }
     }
@@ -80,65 +51,23 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Apply Postgres (DEV)') {
-      when { expression { return params.APPLY_POSTGRES } }
-      steps {
-        sh '''
-          set -eu
-          echo "Applying Postgres in ${NAMESPACE}..."
-
-          helm repo add "${POSTGRES_REPO_NAME}" "${POSTGRES_REPO_URL}" >/dev/null 2>&1 || true
-          helm repo update >/dev/null 2>&1 || true
-
-          test -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}"
-
-          helm upgrade --install "${POSTGRES_RELEASE}" "${POSTGRES_CHART}" \
-            -n "${NAMESPACE}" --create-namespace \
-            -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}" \
-            --wait --timeout 5m --atomic
-        '''
-      }
-    }
-
-    stage('Apply task-service (DEV)') {
-      when { expression { return params.APPLY_TASK_SERVICE } }
+    stage('Helm Upgrade task-service (DEV)') {
       steps {
         dir("${env.TASK_CHART_DIR}") {
-          script {
-            def cmd = """
-              set -eu
-              echo "Applying task-service in ${env.NAMESPACE}..."
+          sh '''
+            set -eu
+            export KUBECONFIG="$KUBECONFIG"
 
-              helm upgrade --install ${env.TASK_RELEASE} . \
-                -n ${env.NAMESPACE} --create-namespace \
-                -f ${env.WORKSPACE}/${env.TASK_VALUES_DEV} \
-                --wait --timeout 5m --atomic
-            """.stripIndent()
+            test -f "${WORKSPACE}/${TASK_VALUES_DEV}"
 
-            if (params.IMAGE_TAG.trim() != "KEEP_CURRENT") {
-              cmd += """
-                --set image.repository=${env.IMAGE_REPO} \
-                --set image.tag=${params.IMAGE_TAG.trim()}
-              """.stripIndent()
-            } else {
-              cmd += "\n# KEEP_CURRENT: not overriding image.tag\n"
-            }
-
-            sh cmd
-          }
+            helm upgrade --install "${RELEASE}" . \
+              -n "${NAMESPACE}" --create-namespace \
+              -f "${WORKSPACE}/${TASK_VALUES_DEV}" \
+              --set image.repository="${IMAGE_REPO}" \
+              --set image.tag="${IMAGE_TAG}" \
+              --wait --timeout 5m --atomic
+          '''
         }
-      }
-    }
-
-    stage('Apply ServiceMonitor (DEV)') {
-      when { expression { return params.APPLY_SERVICE_MONITOR } }
-      steps {
-        sh '''
-          set -eu
-          echo "Applying ServiceMonitor manifest..."
-          test -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
-          kubectl apply -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
-        '''
       }
     }
 
@@ -146,21 +75,23 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "DEV Pods:"
           kubectl -n dev get pods -o wide || true
           echo ""
-          echo "DEV Services:"
-          kubectl -n dev get svc -o wide || true
+          echo "DEV Service:"
+          kubectl -n dev get svc task-service -o wide || true
           echo ""
-          echo "DEV Helm releases:"
-          helm -n dev list || true
+          echo "DEV Helm Release:"
+          helm -n dev status task-service | sed -n '1,60p' || true
         '''
       }
     }
   }
 
   post {
-    success { echo "DEV Deploy Success" }
+    success { echo "DEV Deploy Success (IMAGE_TAG=${params.IMAGE_TAG})" }
     failure { echo "DEV Deploy Failed" }
   }
 }

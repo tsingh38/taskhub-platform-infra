@@ -9,7 +9,7 @@ pipeline {
     string(
       name: 'RELEASE_TAG',
       defaultValue: '',
-      description: 'Release tag to deploy to PROD (Docker tag must exist). Example: 0.1.0'
+      description: 'Docker tag to deploy to PROD (must exist in DockerHub). Example: 0.1.0'
     )
     booleanParam(
       name: 'CONFIRM_PROD',
@@ -21,35 +21,45 @@ pipeline {
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
-    CHART_DIR   = "infra/helm/charts/task-service"
-    VALUES_PROD = "infra/helm/charts/task-service/values-prod.yaml"
-
+    // --- PROD target ---
     NAMESPACE = "prod"
     RELEASE   = "task-service"
 
+    // --- Chart + values (INFRA repo paths) ---
+    CHART_DIR   = "helm/charts/task-service"
+    VALUES_PROD = "helm/charts/task-service/values-prod.yaml"
+
+    // --- Image repo ---
     IMAGE_REPO = "tsingh38/taskhub"
   }
 
   stages {
 
-    stage('Validate Input') {
+    stage('Validate') {
       steps {
         script {
           if (!params.CONFIRM_PROD) {
             error("Blocked: set CONFIRM_PROD=true to deploy PROD.")
           }
           if (!params.RELEASE_TAG?.trim()) {
-            error("RELEASE_TAG is required for PROD deploy.")
+            error("RELEASE_TAG is required for PROD deploy (example: 0.1.0).")
           }
 
-          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '')
-          if (!(branch == 'main' || branch == 'origin/main')) {
-            error("PROD deploy must run from main. Current branch=${branch}")
+          // IMPORTANT: in repo-split design, this job runs from INFRA repo MAIN
+          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
+          def ok = (branch == 'main' || branch == 'origin/main' || branch.endsWith('/main'))
+          if (!ok) {
+            error("PROD deploy job must run from INFRA repo main. Current branch=${branch}")
           }
 
-          sh 'test -f "$KUBECONFIG"'
-          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${params.RELEASE_TAG}"
+          echo "Deploying PROD: ns=${env.NAMESPACE}, release=${env.RELEASE}, image=${env.IMAGE_REPO}:${params.RELEASE_TAG}"
         }
+
+        sh '''
+          set -eu
+          export KUBECONFIG="$KUBECONFIG"
+          test -f "$KUBECONFIG"
+        '''
       }
     }
 
@@ -57,26 +67,43 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Helm Upgrade PROD') {
+    stage('Verify Docker Tag Exists') {
+      steps {
+        sh '''
+          set -eu
+          echo "Checking DockerHub tag exists: ${IMAGE_REPO}:${RELEASE_TAG}"
+          curl -fsSL "https://hub.docker.com/v2/repositories/${IMAGE_REPO}/tags/${RELEASE_TAG}/" >/dev/null
+          echo "OK: tag exists."
+        '''
+      }
+    }
+
+    stage('Helm Upgrade task-service (PROD)') {
       steps {
         dir("${env.CHART_DIR}") {
-          sh """
+          sh '''
             set -eu
-            helm upgrade --install ${env.RELEASE} . \
-              -n ${env.NAMESPACE} --create-namespace \
-              -f ${env.WORKSPACE}/${env.VALUES_PROD} \
-              --set image.repository=${env.IMAGE_REPO} \
-              --set image.tag=${params.RELEASE_TAG.trim()} \
+            export KUBECONFIG="$KUBECONFIG"
+
+            test -f "${WORKSPACE}/${VALUES_PROD}"
+
+            helm upgrade --install "${RELEASE}" . \
+              -n "${NAMESPACE}" --create-namespace \
+              -f "${WORKSPACE}/${VALUES_PROD}" \
+              --set image.repository="${IMAGE_REPO}" \
+              --set image.tag="${RELEASE_TAG}" \
               --wait --timeout 7m --atomic
-          """
+          '''
         }
       }
     }
 
-    stage('Post-Deploy Quick Checks') {
+    stage('Post-deploy checks') {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "PROD Pods:"
           kubectl -n prod get pods -o wide || true
           echo ""
