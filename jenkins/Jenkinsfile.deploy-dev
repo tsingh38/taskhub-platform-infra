@@ -3,22 +3,16 @@ pipeline {
   options { disableConcurrentBuilds() }
 
   parameters {
-    string(
-      name: 'IMAGE_TAG',
-      defaultValue: '',
-      description: 'Docker image tag to deploy to DEV (required). Example: 0.1.1-SNAPSHOT-5'
-    )
+    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag to deploy to DEV (required)')
   }
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
-    // DEV target
     NAMESPACE  = "dev"
     RELEASE    = "task-service"
     IMAGE_REPO = "tsingh38/taskhub"
 
-    // chart lives in infra repo
     CHART_DIR  = "infra/helm/charts/task-service"
     VALUES_REL = "values-dev.yaml"
   }
@@ -32,10 +26,12 @@ pipeline {
     stage('Validate') {
       steps {
         script {
+          echo "DEBUG: IMAGE_TAG='${params.IMAGE_TAG}'"
           if (!params.IMAGE_TAG?.trim()) {
-            error("IMAGE_TAG is required")
+            error("IMAGE_TAG is required. This job must be triggered via 'Build with Parameters' or from CI passing IMAGE_TAG.")
           }
         }
+
         sh '''
           set -eu
           test -f "$KUBECONFIG"
@@ -52,6 +48,7 @@ pipeline {
             set -eu
             export KUBECONFIG="$KUBECONFIG"
 
+            echo "Deploying: ${RELEASE} to ${NAMESPACE} with image ${IMAGE_REPO}:${IMAGE_TAG}"
             helm upgrade --install "$RELEASE" . \
               -n "$NAMESPACE" --create-namespace \
               -f "$VALUES_REL" \
@@ -68,22 +65,16 @@ pipeline {
         sh '''
           set -eu
           export KUBECONFIG="$KUBECONFIG"
-
-          echo "Pods:"
           kubectl -n dev get pods -o wide || true
-          echo ""
-          echo "Service:"
           kubectl -n dev get svc task-service -o wide || true
-          echo ""
-          echo "Helm status:"
-          helm -n dev status task-service | sed -n '1,60p' || true
+          helm -n dev status task-service | sed -n '1,50p' || true
         '''
       }
     }
   }
 
   post {
-    success { echo "DEV Deploy Success (IMAGE_TAG=${params.IMAGE_TAG})" }
+    success { echo "DEV Deploy Success" }
     failure { echo "DEV Deploy Failed" }
   }
 }
