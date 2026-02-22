@@ -1,9 +1,7 @@
 pipeline {
   agent any
 
-  options {
-    disableConcurrentBuilds()
-  }
+  options { disableConcurrentBuilds() }
 
   parameters {
     string(
@@ -15,7 +13,7 @@ pipeline {
     booleanParam(
       name: 'APPLY_TASK_SERVICE',
       defaultValue: true,
-      description: 'Apply task-service Helm release (always recommended).'
+      description: 'Apply task-service Helm release.'
     )
 
     booleanParam(
@@ -33,24 +31,22 @@ pipeline {
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
+    NAMESPACE  = "dev"
 
-    // ---- DEV namespace ----
-    NAMESPACE = "dev"
+    // task-service chart (in INFRA repo)
+    TASK_CHART_DIR  = "infra/helm/charts/task-service"
+    TASK_VALUES_DEV = "infra/helm/charts/task-service/values-dev.yaml"
+    TASK_RELEASE    = "task-service"
+    IMAGE_REPO      = "tsingh38/taskhub"
 
-    // ---- task-service chart ----
-    TASK_CHART_DIR   = "infra/helm/charts/task-service"
-    TASK_VALUES_DEV  = "infra/helm/charts/task-service/values-dev.yaml"
-    TASK_RELEASE     = "task-service"
-    IMAGE_REPO       = "tsingh38/taskhub"
-
-    // ---- postgres (bitnami) ----
+    // postgres (bitnami)
     POSTGRES_RELEASE    = "postgres"
     POSTGRES_REPO_NAME  = "bitnami"
     POSTGRES_REPO_URL   = "https://charts.bitnami.com/bitnami"
     POSTGRES_CHART      = "bitnami/postgresql"
     POSTGRES_VALUES_DEV = "infra/helm/values/postgres/values.dev.yaml"
 
-    // ---- ServiceMonitor manifest ----
+    // ServiceMonitor manifest
     SM_DEV_MANIFEST = "infra/monitoring/servicemonitors/task-service-dev.yaml"
   }
 
@@ -62,16 +58,19 @@ pipeline {
           if (!params.IMAGE_TAG?.trim()) {
             error("IMAGE_TAG is required. Use KEEP_CURRENT to apply infra changes without changing the image.")
           }
+          echo """DEV Deploy:
+  namespace=${env.NAMESPACE}
+  IMAGE_TAG=${params.IMAGE_TAG}
+  APPLY_TASK_SERVICE=${params.APPLY_TASK_SERVICE}
+  APPLY_POSTGRES=${params.APPLY_POSTGRES}
+  APPLY_SERVICE_MONITOR=${params.APPLY_SERVICE_MONITOR}
+""".trim()
         }
+
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
-          echo "DEV Deploy:"
-          echo "  namespace=${NAMESPACE}"
-          echo "  IMAGE_TAG=${IMAGE_TAG}"
-          echo "  APPLY_TASK_SERVICE=${APPLY_TASK_SERVICE}"
-          echo "  APPLY_POSTGRES=${APPLY_POSTGRES}"
-          echo "  APPLY_SERVICE_MONITOR=${APPLY_SERVICE_MONITOR}"
         '''
       }
     }
@@ -85,8 +84,9 @@ pipeline {
       steps {
         sh '''
           set -eu
-          echo "Applying Postgres in ${NAMESPACE}..."
+          export KUBECONFIG="$KUBECONFIG"
 
+          echo "Applying Postgres in ${NAMESPACE}..."
           helm repo add "${POSTGRES_REPO_NAME}" "${POSTGRES_REPO_URL}" >/dev/null 2>&1 || true
           helm repo update >/dev/null 2>&1 || true
 
@@ -105,19 +105,23 @@ pipeline {
       steps {
         dir("${env.TASK_CHART_DIR}") {
           script {
+            // IMPORTANT: quote all -f paths
             def cmd = """
               set -eu
-              echo "Applying task-service in ${env.NAMESPACE}..."
+              export KUBECONFIG="\$KUBECONFIG"
 
-              helm upgrade --install ${env.TASK_RELEASE} . \
-                -n ${env.NAMESPACE} --create-namespace \
-                -f ${env.WORKSPACE}/${env.TASK_VALUES_DEV} \
+              echo "Applying task-service in ${env.NAMESPACE}..."
+              test -f "${env.WORKSPACE}/${env.TASK_VALUES_DEV}"
+
+              helm upgrade --install "${env.TASK_RELEASE}" . \\
+                -n "${env.NAMESPACE}" --create-namespace \\
+                -f "${env.WORKSPACE}/${env.TASK_VALUES_DEV}" \\
                 --wait --timeout 5m --atomic
             """.stripIndent()
 
             if (params.IMAGE_TAG.trim() != "KEEP_CURRENT") {
               cmd += """
-                --set image.repository=${env.IMAGE_REPO} \
+                --set image.repository=${env.IMAGE_REPO} \\
                 --set image.tag=${params.IMAGE_TAG.trim()}
               """.stripIndent()
             } else {
@@ -135,9 +139,11 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "Applying ServiceMonitor manifest..."
           test -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
-          kubectl apply -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
+          kubectl apply -n "${NAMESPACE}" -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
         '''
       }
     }
@@ -146,6 +152,8 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "DEV Pods:"
           kubectl -n dev get pods -o wide || true
           echo ""
