@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: task-service-monitor
+  namespace: prod
+  labels:
+    release: monitoring-stack
+    app: task-service
+spec:
+  namespaceSelector:
+    matchNames:
+      - prod
+  selector:
+    matchLabels:
+      app: task-service
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s

@@ -1,0 +1,19 @@
+
+
+prometheus:
+  prometheusSpec:
+    retention: 30d
+    resources:
+      requests:
+        memory: 4Gi         # Big memory
+    storageSpec:            # Persistent Volume (Don't lose data on restart)
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 50Gi
+
+alertmanager:
+  config:
+    global:
+      slack_api_url: "https://hooks.slack.com/...PLACEHOLDER"

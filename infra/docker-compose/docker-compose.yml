@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: ../../services/task-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taskhub
+      SPRING_DATASOURCE_USERNAME: taskhub
+      SPRING_DATASOURCE_PASSWORD: taskhub
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: taskhub
+      POSTGRES_USER: taskhub
+      POSTGRES_PASSWORD: taskhub
+    ports:
+      - "5432:5432"

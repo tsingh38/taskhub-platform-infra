@@ -1,0 +1,97 @@
+pipeline {
+  agent any
+
+  options {
+    disableConcurrentBuilds()
+  }
+
+  parameters {
+    string(
+      name: 'RELEASE_TAG',
+      defaultValue: '',
+      description: 'Release tag to deploy to PROD (Docker tag must exist). Example: 0.1.0'
+    )
+    booleanParam(
+      name: 'CONFIRM_PROD',
+      defaultValue: false,
+      description: 'Safety switch: must be TRUE to deploy to PROD'
+    )
+  }
+
+  environment {
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    CHART_DIR   = "infra/helm/charts/task-service"
+    VALUES_PROD = "infra/helm/charts/task-service/values-prod.yaml"
+
+    NAMESPACE = "prod"
+    RELEASE   = "task-service"
+
+    IMAGE_REPO = "tsingh38/taskhub"
+  }
+
+  stages {
+
+    stage('Validate Input') {
+      steps {
+        script {
+          if (!params.CONFIRM_PROD) {
+            error("Blocked: set CONFIRM_PROD=true to deploy PROD.")
+          }
+          if (!params.RELEASE_TAG?.trim()) {
+            error("RELEASE_TAG is required for PROD deploy.")
+          }
+
+          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '')
+          if (!(branch == 'main' || branch == 'origin/main')) {
+            error("PROD deploy must run from main. Current branch=${branch}")
+          }
+
+          sh 'test -f "$KUBECONFIG"'
+          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${params.RELEASE_TAG}"
+        }
+      }
+    }
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Helm Upgrade PROD') {
+      steps {
+        dir("${env.CHART_DIR}") {
+          sh """
+            set -eu
+            helm upgrade --install ${env.RELEASE} . \
+              -n ${env.NAMESPACE} --create-namespace \
+              -f ${env.WORKSPACE}/${env.VALUES_PROD} \
+              --set image.repository=${env.IMAGE_REPO} \
+              --set image.tag=${params.RELEASE_TAG.trim()} \
+              --wait --timeout 7m --atomic
+          """
+        }
+      }
+    }
+
+    stage('Post-Deploy Quick Checks') {
+      steps {
+        sh '''
+          set -eu
+          echo "PROD Pods:"
+          kubectl -n prod get pods -o wide || true
+          echo ""
+          echo "PROD Service:"
+          kubectl -n prod get svc task-service -o wide || true
+          echo ""
+          echo "PROD Helm Release:"
+          helm -n prod status task-service | sed -n '1,80p' || true
+        '''
+      }
+    }
+  }
+
+  post {
+    success { echo "PROD Deploy Success (RELEASE_TAG=${params.RELEASE_TAG})" }
+    failure { echo "PROD Deploy Failed" }
+  }
+}

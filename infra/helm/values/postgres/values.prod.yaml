@@ -1,0 +1,13 @@
+auth:
+  database: taskdb
+  existingSecret: db-credentials
+
+primary:
+  persistence:
+    enabled: true
+    size: 8Gi
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi

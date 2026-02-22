@@ -1,0 +1,144 @@
+pipeline {
+  agent any
+
+  parameters {
+    booleanParam(
+      name: 'CONFIRM_BOOTSTRAP',
+      defaultValue: false,
+      description: 'Safety switch: must be TRUE to run bootstrap/import steps'
+    )
+    choice(
+      name: 'TARGET',
+      choices: ['none', 'monitoring', 'dev', 'prod'],
+      description: 'Which stack to bootstrap/import into Terraform state'
+    )
+  }
+
+  environment {
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    TF_STATE_MONITORING = "/var/lib/jenkins/terraform-state/taskhub-monitoring/terraform.tfstate"
+    TF_STATE_DEV        = "/var/lib/jenkins/terraform-state/taskhub-dev/terraform.dev.tfstate"
+    TF_STATE_PROD       = "/var/lib/jenkins/terraform-state/taskhub-prod/terraform.prod.tfstate"
+  }
+
+  stages {
+
+    stage('Validate Input') {
+      steps {
+        script {
+          if (!params.CONFIRM_BOOTSTRAP) {
+            error("Bootstrap blocked. Tick CONFIRM_BOOTSTRAP=true and pick TARGET (monitoring/dev/prod).")
+          }
+          if (params.TARGET == null || params.TARGET.trim() == '' || params.TARGET == 'none') {
+            error("Bootstrap blocked. Select a valid TARGET (monitoring/dev/prod).")
+          }
+        }
+      }
+    }
+
+    stage('Checkout') {
+      when { expression { return params.CONFIRM_BOOTSTRAP && params.TARGET != 'none' } }
+      steps { checkout scm }
+    }
+
+    stage('Bootstrap Monitoring') {
+      when { expression { return params.CONFIRM_BOOTSTRAP && params.TARGET == 'monitoring' } }
+      steps {
+        dir('infra/terraform/monitoring') {
+          withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
+            sh '''
+              set -eu
+              test -f "$KUBECONFIG"
+              mkdir -p "$(dirname "$TF_STATE_MONITORING")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_slack_webhook_url="$SLACK_WEBHOOK"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_MONITORING"
+
+              terraform import -input=false kubernetes_namespace.monitoring monitoring || true
+              terraform import -input=false kubernetes_secret.alertmanager_slack monitoring/alertmanager-slack-token || true
+              terraform import -input=false helm_release.prometheus_stack monitoring/monitoring-stack || true
+
+              terraform plan
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Bootstrap Dev') {
+      when { expression { return params.CONFIRM_BOOTSTRAP && params.TARGET == 'dev' } }
+      steps {
+        dir('infra/terraform/dev') {
+          withCredentials([
+            string(credentialsId: 'db-user', variable: 'DB_USER_DEV'),
+            string(credentialsId: 'db-password', variable: 'DB_PASSWORD_DEV')
+          ]) {
+            sh '''
+              set -eu
+              test -f "$KUBECONFIG"
+              mkdir -p "$(dirname "$TF_STATE_DEV")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_dev="$DB_USER_DEV"
+              export TF_VAR_db_password_dev="$DB_PASSWORD_DEV"
+              export TF_VAR_app_version="bootstrap"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_DEV"
+
+              terraform import -input=false kubernetes_namespace.dev dev || true
+              terraform import -input=false kubernetes_secret.db_credentials_dev dev/db-credentials || true
+              terraform import -input=false helm_release.postgres_dev dev/postgres || true
+              terraform import -input=false helm_release.task_service_dev dev/task-service || true
+
+              terraform plan
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Bootstrap Prod') {
+      when { expression { return params.CONFIRM_BOOTSTRAP && params.TARGET == 'prod' } }
+      steps {
+        dir('infra/terraform/prod') {
+          withCredentials([
+            string(credentialsId: 'db-user-prod', variable: 'DB_USER_PROD'),
+            string(credentialsId: 'db-password-prod', variable: 'DB_PASSWORD_PROD')
+          ]) {
+            sh '''
+              set -eu
+              test -f "$KUBECONFIG"
+              mkdir -p "$(dirname "$TF_STATE_PROD")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_prod="$DB_USER_PROD"
+              export TF_VAR_db_password_prod="$DB_PASSWORD_PROD"
+              export TF_VAR_app_version="bootstrap"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_PROD"
+
+              terraform import -input=false kubernetes_namespace.prod prod || true
+              terraform import -input=false kubernetes_secret.db_credentials_prod prod/db-credentials || true
+              terraform import -input=false helm_release.postgres_prod prod/postgres || true
+              terraform import -input=false helm_release.task_service_prod prod/task-service || true
+
+              terraform plan
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "Bootstrap job finished (success/failure)."
+    }
+  }
+}

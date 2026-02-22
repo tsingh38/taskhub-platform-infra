@@ -1,0 +1,166 @@
+pipeline {
+  agent any
+
+  options {
+    disableConcurrentBuilds()
+  }
+
+  parameters {
+    string(
+      name: 'IMAGE_TAG',
+      defaultValue: 'KEEP_CURRENT',
+      description: 'Docker image tag to deploy to DEV. Use KEEP_CURRENT to apply infra changes without changing the app image.'
+    )
+
+    booleanParam(
+      name: 'APPLY_TASK_SERVICE',
+      defaultValue: true,
+      description: 'Apply task-service Helm release (always recommended).'
+    )
+
+    booleanParam(
+      name: 'APPLY_POSTGRES',
+      defaultValue: false,
+      description: 'Apply Postgres Helm release (only if postgres values changed).'
+    )
+
+    booleanParam(
+      name: 'APPLY_SERVICE_MONITOR',
+      defaultValue: false,
+      description: 'Apply ServiceMonitor manifest (only if servicemonitor yaml changed).'
+    )
+  }
+
+  environment {
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    // ---- DEV namespace ----
+    NAMESPACE = "dev"
+
+    // ---- task-service chart ----
+    TASK_CHART_DIR   = "infra/helm/charts/task-service"
+    TASK_VALUES_DEV  = "infra/helm/charts/task-service/values-dev.yaml"
+    TASK_RELEASE     = "task-service"
+    IMAGE_REPO       = "tsingh38/taskhub"
+
+    // ---- postgres (bitnami) ----
+    POSTGRES_RELEASE    = "postgres"
+    POSTGRES_REPO_NAME  = "bitnami"
+    POSTGRES_REPO_URL   = "https://charts.bitnami.com/bitnami"
+    POSTGRES_CHART      = "bitnami/postgresql"
+    POSTGRES_VALUES_DEV = "infra/helm/values/postgres/values.dev.yaml"
+
+    // ---- ServiceMonitor manifest ----
+    SM_DEV_MANIFEST = "infra/monitoring/servicemonitors/task-service-dev.yaml"
+  }
+
+  stages {
+
+    stage('Validate') {
+      steps {
+        script {
+          if (!params.IMAGE_TAG?.trim()) {
+            error("IMAGE_TAG is required. Use KEEP_CURRENT to apply infra changes without changing the image.")
+          }
+        }
+        sh '''
+          set -eu
+          test -f "$KUBECONFIG"
+          echo "DEV Deploy:"
+          echo "  namespace=${NAMESPACE}"
+          echo "  IMAGE_TAG=${IMAGE_TAG}"
+          echo "  APPLY_TASK_SERVICE=${APPLY_TASK_SERVICE}"
+          echo "  APPLY_POSTGRES=${APPLY_POSTGRES}"
+          echo "  APPLY_SERVICE_MONITOR=${APPLY_SERVICE_MONITOR}"
+        '''
+      }
+    }
+
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Apply Postgres (DEV)') {
+      when { expression { return params.APPLY_POSTGRES } }
+      steps {
+        sh '''
+          set -eu
+          echo "Applying Postgres in ${NAMESPACE}..."
+
+          helm repo add "${POSTGRES_REPO_NAME}" "${POSTGRES_REPO_URL}" >/dev/null 2>&1 || true
+          helm repo update >/dev/null 2>&1 || true
+
+          test -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}"
+
+          helm upgrade --install "${POSTGRES_RELEASE}" "${POSTGRES_CHART}" \
+            -n "${NAMESPACE}" --create-namespace \
+            -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}" \
+            --wait --timeout 5m --atomic
+        '''
+      }
+    }
+
+    stage('Apply task-service (DEV)') {
+      when { expression { return params.APPLY_TASK_SERVICE } }
+      steps {
+        dir("${env.TASK_CHART_DIR}") {
+          script {
+            def cmd = """
+              set -eu
+              echo "Applying task-service in ${env.NAMESPACE}..."
+
+              helm upgrade --install ${env.TASK_RELEASE} . \
+                -n ${env.NAMESPACE} --create-namespace \
+                -f ${env.WORKSPACE}/${env.TASK_VALUES_DEV} \
+                --wait --timeout 5m --atomic
+            """.stripIndent()
+
+            if (params.IMAGE_TAG.trim() != "KEEP_CURRENT") {
+              cmd += """
+                --set image.repository=${env.IMAGE_REPO} \
+                --set image.tag=${params.IMAGE_TAG.trim()}
+              """.stripIndent()
+            } else {
+              cmd += "\n# KEEP_CURRENT: not overriding image.tag\n"
+            }
+
+            sh cmd
+          }
+        }
+      }
+    }
+
+    stage('Apply ServiceMonitor (DEV)') {
+      when { expression { return params.APPLY_SERVICE_MONITOR } }
+      steps {
+        sh '''
+          set -eu
+          echo "Applying ServiceMonitor manifest..."
+          test -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
+          kubectl apply -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
+        '''
+      }
+    }
+
+    stage('Post-deploy checks') {
+      steps {
+        sh '''
+          set -eu
+          echo "DEV Pods:"
+          kubectl -n dev get pods -o wide || true
+          echo ""
+          echo "DEV Services:"
+          kubectl -n dev get svc -o wide || true
+          echo ""
+          echo "DEV Helm releases:"
+          helm -n dev list || true
+        '''
+      }
+    }
+  }
+
+  post {
+    success { echo "DEV Deploy Success" }
+    failure { echo "DEV Deploy Failed" }
+  }
+}

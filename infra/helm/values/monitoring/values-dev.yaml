@@ -1,0 +1,23 @@
+# DEV ENVIRONMENT
+
+prometheus:
+  prometheusSpec:
+    alertingEndpoints:
+      - namespace: monitoring
+        name: monitoring-stack-kube-prom-alertmanager
+        port: http-web
+        pathPrefix: /
+    retention: 2d
+    resources:
+      requests:
+        memory: 256Mi
+
+grafana:
+  service:
+    type: NodePort
+    nodePort: 30030
+
+alertmanager:
+  config:
+    global:
+      slack_api_url: "https://hooks.slack.com/services/PLACEHOLDER_TOKEN"
