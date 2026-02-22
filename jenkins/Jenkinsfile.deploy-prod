@@ -9,8 +9,8 @@ pipeline {
   parameters {
     string(
       name: 'RELEASE_TAG',
-      defaultValue: '',
-      description: 'Docker tag to deploy to PROD (must exist in Docker Hub). Example: 0.1.0'
+      defaultValue: 'KEEP_CURRENT',
+      description: 'Docker tag to deploy to PROD. Use KEEP_CURRENT to apply values changes without changing the image tag. Example: 0.1.0'
     )
     booleanParam(
       name: 'CONFIRM_PROD',
@@ -27,7 +27,7 @@ pipeline {
     RELEASE    = "task-service"
     IMAGE_REPO = "tsingh38/taskhub"
 
-    // chart lives in infra repo
+    // chart + values live in infra repo
     CHART_DIR   = "infra/helm/charts/task-service"
     VALUES_PROD = "infra/helm/values/task-service/values-prod.yaml"
   }
@@ -44,11 +44,13 @@ pipeline {
           if (!params.CONFIRM_PROD) {
             error("Blocked: set CONFIRM_PROD=true to deploy PROD.")
           }
+
           if (!params.RELEASE_TAG?.trim()) {
-            error("RELEASE_TAG is required for PROD deploy.")
+            error("RELEASE_TAG is required (use KEEP_CURRENT for config-only deploys).")
           }
+
           env.RELEASE_TAG = params.RELEASE_TAG.trim()
-          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${env.RELEASE_TAG}"
+          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, RELEASE_TAG=${env.RELEASE_TAG}"
         }
 
         sh '''
@@ -63,17 +65,28 @@ pipeline {
     stage('Helm Upgrade PROD (task-service only)') {
       steps {
         dir("${env.CHART_DIR}") {
-          sh '''
-            set -eu
-            export KUBECONFIG="$KUBECONFIG"
+          script {
+            def cmd = """
+              set -eu
+              export KUBECONFIG="$KUBECONFIG"
 
-            helm upgrade --install "$RELEASE" . \
-              -n "$NAMESPACE" --create-namespace \
-              -f "$WORKSPACE/$VALUES_PROD" \
-              --set image.repository="$IMAGE_REPO" \
-              --set image.tag="$RELEASE_TAG" \
-              --wait --timeout 7m --atomic
-          '''
+              helm upgrade --install "$RELEASE" . \\
+                -n "$NAMESPACE" --create-namespace \\
+                -f "$WORKSPACE/$VALUES_PROD" \\
+                --wait --timeout 7m --atomic
+            """.stripIndent()
+
+            if (env.RELEASE_TAG != "KEEP_CURRENT") {
+              cmd += """
+                --set image.repository="$IMAGE_REPO" \\
+                --set image.tag="$RELEASE_TAG"
+              """.stripIndent()
+            } else {
+              cmd += "\n# KEEP_CURRENT: not overriding image.tag\n"
+            }
+
+            sh cmd
+          }
         }
       }
     }
