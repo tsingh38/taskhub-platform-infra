@@ -1,13 +1,12 @@
 pipeline {
   agent any
-
   options { disableConcurrentBuilds() }
 
   parameters {
     string(
       name: 'RELEASE_TAG',
       defaultValue: '',
-      description: 'Release tag to deploy to PROD (Docker tag must exist). Example: 0.1.0'
+      description: 'Docker tag to deploy to PROD (must exist in Docker Hub). Example: 0.1.0'
     )
     booleanParam(
       name: 'CONFIRM_PROD',
@@ -30,7 +29,7 @@ pipeline {
 
   stages {
 
-    stage('Validate Input') {
+    stage('Validate') {
       steps {
         script {
           if (!params.CONFIRM_PROD) {
@@ -39,13 +38,6 @@ pipeline {
           if (!params.RELEASE_TAG?.trim()) {
             error("RELEASE_TAG is required for PROD deploy.")
           }
-
-          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
-          def ok = (branch == 'main' || branch == 'origin/main' || branch.endsWith('/main'))
-          if (!ok) {
-            error("PROD deploy must run from main. Current branch=${branch}")
-          }
-
           echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${params.RELEASE_TAG}"
         }
 
@@ -62,25 +54,25 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Helm Upgrade PROD') {
+    stage('Helm Upgrade PROD (task-service only)') {
       steps {
         dir("${env.CHART_DIR}") {
-          sh """
+          sh '''
             set -eu
-            export KUBECONFIG="\$KUBECONFIG"
+            export KUBECONFIG="$KUBECONFIG"
 
-            helm upgrade --install "${env.RELEASE}" . \\
-              -n "${env.NAMESPACE}" --create-namespace \\
-              -f "${env.WORKSPACE}/${env.VALUES_PROD}" \\
-              --set image.repository="${env.IMAGE_REPO}" \\
-              --set image.tag="${params.RELEASE_TAG.trim()}" \\
+            helm upgrade --install "$RELEASE" . \
+              -n "$NAMESPACE" --create-namespace \
+              -f "$WORKSPACE/$VALUES_PROD" \
+              --set image.repository="$IMAGE_REPO" \
+              --set image.tag="$RELEASE_TAG" \
               --wait --timeout 7m --atomic
-          """
+          '''
         }
       }
     }
 
-    stage('Post-Deploy Quick Checks') {
+    stage('Post-deploy checks') {
       steps {
         sh '''
           set -eu

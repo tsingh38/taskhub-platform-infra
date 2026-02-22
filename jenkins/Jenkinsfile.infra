@@ -10,24 +10,37 @@ pipeline {
     booleanParam(
       name: 'CONFIRM_APPLY',
       defaultValue: false,
-      description: 'Safety switch: must be TRUE to apply monitoring infrastructure.'
+      description: 'Safety switch: must be TRUE to run Terraform apply.'
+    )
+    choice(
+      name: 'TARGET',
+      choices: ['monitoring', 'dev', 'prod'],
+      description: 'Which platform stack to apply'
     )
   }
 
   environment {
-    KUBECONFIG          = "/var/lib/jenkins/.kube/config"
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
     TF_STATE_MONITORING = "/var/lib/jenkins/terraform-state/taskhub-monitoring/terraform.tfstate"
+    TF_STATE_DEV        = "/var/lib/jenkins/terraform-state/taskhub-dev/terraform.tfstate"
+    TF_STATE_PROD       = "/var/lib/jenkins/terraform-state/taskhub-prod/terraform.tfstate"
   }
 
   stages {
 
-    stage('Validate Input') {
+    stage('Validate') {
       steps {
         script {
           if (!params.CONFIRM_APPLY) {
-            error("Apply blocked. Tick CONFIRM_APPLY=true to run monitoring Terraform apply.")
+            error("Apply blocked. Tick CONFIRM_APPLY=true.")
           }
+          echo "Platform apply TARGET=${params.TARGET}"
         }
+        sh '''
+          set -eu
+          test -f "$KUBECONFIG"
+        '''
       }
     }
 
@@ -35,13 +48,13 @@ pipeline {
       steps { checkout scm }
     }
 
-    stage('Deploy Monitoring (Terraform)') {
+    stage('Terraform Apply (Monitoring)') {
+      when { expression { return params.TARGET == 'monitoring' } }
       steps {
         dir('infra/terraform/monitoring') {
           withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
             sh '''
               set -eu
-              test -f "$KUBECONFIG"
               mkdir -p "$(dirname "$TF_STATE_MONITORING")"
 
               export TF_VAR_kubeconfig_path="$KUBECONFIG"
@@ -55,22 +68,76 @@ pipeline {
       }
     }
 
-    stage('Post-Apply Quick Checks') {
+    stage('Terraform Apply (DEV)') {
+      when { expression { return params.TARGET == 'dev' } }
+      steps {
+        dir('infra/terraform/dev') {
+          withCredentials([
+            string(credentialsId: 'db-user', variable: 'DB_USER_DEV'),
+            string(credentialsId: 'db-password', variable: 'DB_PASSWORD_DEV')
+          ]) {
+            sh '''
+              set -eu
+              mkdir -p "$(dirname "$TF_STATE_DEV")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_dev="$DB_USER_DEV"
+              export TF_VAR_db_password_dev="$DB_PASSWORD_DEV"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_DEV"
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Terraform Apply (PROD)') {
+      when { expression { return params.TARGET == 'prod' } }
+      steps {
+        dir('infra/terraform/prod') {
+          withCredentials([
+            string(credentialsId: 'db-user-prod', variable: 'DB_USER_PROD'),
+            string(credentialsId: 'db-password-prod', variable: 'DB_PASSWORD_PROD')
+          ]) {
+            sh '''
+              set -eu
+              mkdir -p "$(dirname "$TF_STATE_PROD")"
+
+              export TF_VAR_kubeconfig_path="$KUBECONFIG"
+              export TF_VAR_db_user_prod="$DB_USER_PROD"
+              export TF_VAR_db_password_prod="$DB_PASSWORD_PROD"
+
+              terraform init -reconfigure -input=false -backend-config="path=$TF_STATE_PROD"
+              terraform apply -auto-approve -input=false
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Post-Apply Checks') {
       steps {
         sh '''
           set -eu
-          echo "Monitoring pods:"
+          echo "Namespaces:"
+          kubectl get ns | egrep 'dev|prod|monitoring' || true
+          echo ""
+          echo "Monitoring:"
           kubectl -n monitoring get pods -o wide || true
           echo ""
-          echo "Grafana service:"
-          kubectl -n monitoring get svc monitoring-stack-grafana -o wide || true
+          echo "DEV:"
+          kubectl -n dev get pods -o wide || true
+          echo ""
+          echo "PROD:"
+          kubectl -n prod get pods -o wide || true
         '''
       }
     }
   }
 
   post {
-    success { echo "Infra/Monitoring apply success" }
-    failure { echo "Infra/Monitoring apply failed" }
+    success { echo "Platform apply SUCCESS (TARGET=${params.TARGET})" }
+    failure { echo "Platform apply FAILED (TARGET=${params.TARGET})" }
   }
 }

@@ -1,168 +1,53 @@
 pipeline {
   agent any
-
   options { disableConcurrentBuilds() }
 
   parameters {
-    string(
-      name: 'IMAGE_TAG',
-      defaultValue: 'KEEP_CURRENT',
-      description: 'Docker image tag to deploy to DEV. Use KEEP_CURRENT to apply infra changes without changing the app image.'
-    )
-
-    booleanParam(
-      name: 'APPLY_TASK_SERVICE',
-      defaultValue: true,
-      description: 'Apply task-service Helm release.'
-    )
-
-    booleanParam(
-      name: 'APPLY_POSTGRES',
-      defaultValue: false,
-      description: 'Apply Postgres Helm release (only if postgres values changed).'
-    )
-
-    booleanParam(
-      name: 'APPLY_SERVICE_MONITOR',
-      defaultValue: false,
-      description: 'Apply ServiceMonitor manifest (only if servicemonitor yaml changed).'
-    )
+    string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag to deploy to DEV (required)')
   }
 
   environment {
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
     NAMESPACE  = "dev"
+    RELEASE    = "task-service"
+    IMAGE_REPO = "tsingh38/taskhub"
 
-    // task-service chart (in INFRA repo)
-    TASK_CHART_DIR  = "infra/helm/charts/task-service"
-    TASK_VALUES_DEV = "infra/helm/charts/task-service/values-dev.yaml"
-    TASK_RELEASE    = "task-service"
-    IMAGE_REPO      = "tsingh38/taskhub"
-
-    // postgres (bitnami)
-    POSTGRES_RELEASE    = "postgres"
-    POSTGRES_REPO_NAME  = "bitnami"
-    POSTGRES_REPO_URL   = "https://charts.bitnami.com/bitnami"
-    POSTGRES_CHART      = "bitnami/postgresql"
-    POSTGRES_VALUES_DEV = "infra/helm/values/postgres/values.dev.yaml"
-
-    // ServiceMonitor manifest
-    SM_DEV_MANIFEST = "infra/monitoring/servicemonitors/task-service-dev.yaml"
+    CHART_DIR  = "infra/helm/charts/task-service"
+    VALUES_DEV = "infra/helm/charts/task-service/values-dev.yaml"
   }
 
   stages {
-
     stage('Validate') {
       steps {
         script {
-          if (!params.IMAGE_TAG?.trim()) {
-            error("IMAGE_TAG is required. Use KEEP_CURRENT to apply infra changes without changing the image.")
-          }
-          echo """DEV Deploy:
-  namespace=${env.NAMESPACE}
-  IMAGE_TAG=${params.IMAGE_TAG}
-  APPLY_TASK_SERVICE=${params.APPLY_TASK_SERVICE}
-  APPLY_POSTGRES=${params.APPLY_POSTGRES}
-  APPLY_SERVICE_MONITOR=${params.APPLY_SERVICE_MONITOR}
-""".trim()
+          if (!params.IMAGE_TAG?.trim()) error("IMAGE_TAG is required")
         }
-
         sh '''
           set -eu
           export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
+          test -f "$WORKSPACE/$VALUES_DEV"
         '''
       }
     }
 
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
-    stage('Apply Postgres (DEV)') {
-      when { expression { return params.APPLY_POSTGRES } }
+    stage('Helm Upgrade DEV (task-service only)') {
       steps {
-        sh '''
-          set -eu
-          export KUBECONFIG="$KUBECONFIG"
+        dir("${env.CHART_DIR}") {
+          sh '''
+            set -eu
+            export KUBECONFIG="$KUBECONFIG"
 
-          echo "Applying Postgres in ${NAMESPACE}..."
-          helm repo add "${POSTGRES_REPO_NAME}" "${POSTGRES_REPO_URL}" >/dev/null 2>&1 || true
-          helm repo update >/dev/null 2>&1 || true
-
-          test -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}"
-
-          helm upgrade --install "${POSTGRES_RELEASE}" "${POSTGRES_CHART}" \
-            -n "${NAMESPACE}" --create-namespace \
-            -f "${WORKSPACE}/${POSTGRES_VALUES_DEV}" \
-            --wait --timeout 5m --atomic
-        '''
-      }
-    }
-
-    stage('Apply task-service (DEV)') {
-      when { expression { return params.APPLY_TASK_SERVICE } }
-      steps {
-        dir("${env.TASK_CHART_DIR}") {
-          script {
-            // IMPORTANT: quote all -f paths
-            def cmd = """
-              set -eu
-              export KUBECONFIG="\$KUBECONFIG"
-
-              echo "Applying task-service in ${env.NAMESPACE}..."
-              test -f "${env.WORKSPACE}/${env.TASK_VALUES_DEV}"
-
-              helm upgrade --install "${env.TASK_RELEASE}" . \\
-                -n "${env.NAMESPACE}" --create-namespace \\
-                -f "${env.WORKSPACE}/${env.TASK_VALUES_DEV}" \\
-                --wait --timeout 5m --atomic
-            """.stripIndent()
-
-            if (params.IMAGE_TAG.trim() != "KEEP_CURRENT") {
-              cmd += """
-                --set image.repository=${env.IMAGE_REPO} \\
-                --set image.tag=${params.IMAGE_TAG.trim()}
-              """.stripIndent()
-            } else {
-              cmd += "\n# KEEP_CURRENT: not overriding image.tag\n"
-            }
-
-            sh cmd
-          }
+            helm upgrade --install "$RELEASE" . \
+              -n "$NAMESPACE" --create-namespace \
+              -f "$WORKSPACE/$VALUES_DEV" \
+              --set image.repository="$IMAGE_REPO" \
+              --set image.tag="$IMAGE_TAG" \
+              --wait --timeout 7m --atomic
+          '''
         }
-      }
-    }
-
-    stage('Apply ServiceMonitor (DEV)') {
-      when { expression { return params.APPLY_SERVICE_MONITOR } }
-      steps {
-        sh '''
-          set -eu
-          export KUBECONFIG="$KUBECONFIG"
-
-          echo "Applying ServiceMonitor manifest..."
-          test -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
-          kubectl apply -n "${NAMESPACE}" -f "${WORKSPACE}/${SM_DEV_MANIFEST}"
-        '''
-      }
-    }
-
-    stage('Post-deploy checks') {
-      steps {
-        sh '''
-          set -eu
-          export KUBECONFIG="$KUBECONFIG"
-
-          echo "DEV Pods:"
-          kubectl -n dev get pods -o wide || true
-          echo ""
-          echo "DEV Services:"
-          kubectl -n dev get svc -o wide || true
-          echo ""
-          echo "DEV Helm releases:"
-          helm -n dev list || true
-        '''
       }
     }
   }
