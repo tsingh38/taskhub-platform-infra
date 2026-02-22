@@ -1,6 +1,10 @@
 pipeline {
   agent any
-  options { disableConcurrentBuilds() }
+
+  options {
+    disableConcurrentBuilds()
+    skipDefaultCheckout(true)
+  }
 
   parameters {
     string(name: 'IMAGE_TAG', defaultValue: '', description: 'Docker image tag to deploy to DEV (required)')
@@ -14,7 +18,7 @@ pipeline {
     IMAGE_REPO = "tsingh38/taskhub"
 
     CHART_DIR  = "infra/helm/charts/task-service"
-    VALUES_REL = "values-dev.yaml"
+    VALUES_DEV = "infra/helm/values/task-service/values-dev.yaml"
   }
 
   stages {
@@ -26,17 +30,16 @@ pipeline {
     stage('Validate') {
       steps {
         script {
-          echo "DEBUG: IMAGE_TAG='${params.IMAGE_TAG}'"
-          if (!params.IMAGE_TAG?.trim()) {
-            error("IMAGE_TAG is required. This job must be triggered via 'Build with Parameters' or from CI passing IMAGE_TAG.")
-          }
+          if (!params.IMAGE_TAG?.trim()) error("IMAGE_TAG is required (example: 0.1.1-SNAPSHOT-12)")
+          env.IMAGE_TAG = params.IMAGE_TAG.trim()
+          echo "Deploy DEV with IMAGE_TAG=${env.IMAGE_TAG}"
         }
 
         sh '''
           set -eu
           test -f "$KUBECONFIG"
           test -d "$CHART_DIR"
-          test -f "$CHART_DIR/$VALUES_REL"
+          test -f "$WORKSPACE/$VALUES_DEV"
         '''
       }
     }
@@ -48,10 +51,9 @@ pipeline {
             set -eu
             export KUBECONFIG="$KUBECONFIG"
 
-            echo "Deploying: ${RELEASE} to ${NAMESPACE} with image ${IMAGE_REPO}:${IMAGE_TAG}"
             helm upgrade --install "$RELEASE" . \
               -n "$NAMESPACE" --create-namespace \
-              -f "$VALUES_REL" \
+              -f "$WORKSPACE/$VALUES_DEV" \
               --set image.repository="$IMAGE_REPO" \
               --set image.tag="$IMAGE_TAG" \
               --wait --timeout 7m --atomic
@@ -67,14 +69,14 @@ pipeline {
           export KUBECONFIG="$KUBECONFIG"
           kubectl -n dev get pods -o wide || true
           kubectl -n dev get svc task-service -o wide || true
-          helm -n dev status task-service | sed -n '1,50p' || true
+          helm -n dev status task-service | sed -n '1,80p' || true
         '''
       }
     }
   }
 
   post {
-    success { echo "DEV Deploy Success" }
-    failure { echo "DEV Deploy Failed" }
+    success { echo "DEV Deploy Success (IMAGE_TAG=${params.IMAGE_TAG})" }
+    failure { echo "DEV Deploy Failed (IMAGE_TAG=${params.IMAGE_TAG})" }
   }
 }

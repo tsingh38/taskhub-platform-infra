@@ -1,6 +1,10 @@
 pipeline {
   agent any
-  options { disableConcurrentBuilds() }
+
+  options {
+    disableConcurrentBuilds()
+    skipDefaultCheckout(true)
+  }
 
   parameters {
     string(
@@ -24,8 +28,8 @@ pipeline {
     IMAGE_REPO = "tsingh38/taskhub"
 
     // chart lives in infra repo
-    CHART_DIR  = "infra/helm/charts/task-service"
-    VALUES_REL = "values-prod.yaml"
+    CHART_DIR   = "infra/helm/charts/task-service"
+    VALUES_PROD = "infra/helm/values/task-service/values-prod.yaml"
   }
 
   stages {
@@ -43,14 +47,15 @@ pipeline {
           if (!params.RELEASE_TAG?.trim()) {
             error("RELEASE_TAG is required for PROD deploy.")
           }
-          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${params.RELEASE_TAG}"
+          env.RELEASE_TAG = params.RELEASE_TAG.trim()
+          echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${env.RELEASE_TAG}"
         }
 
         sh '''
           set -eu
           test -f "$KUBECONFIG"
           test -d "$CHART_DIR"
-          test -f "$CHART_DIR/$VALUES_REL"
+          test -f "$WORKSPACE/$VALUES_PROD"
         '''
       }
     }
@@ -64,7 +69,7 @@ pipeline {
 
             helm upgrade --install "$RELEASE" . \
               -n "$NAMESPACE" --create-namespace \
-              -f "$VALUES_REL" \
+              -f "$WORKSPACE/$VALUES_PROD" \
               --set image.repository="$IMAGE_REPO" \
               --set image.tag="$RELEASE_TAG" \
               --wait --timeout 7m --atomic
@@ -94,6 +99,6 @@ pipeline {
 
   post {
     success { echo "PROD Deploy Success (RELEASE_TAG=${params.RELEASE_TAG})" }
-    failure { echo "PROD Deploy Failed" }
+    failure { echo "PROD Deploy Failed (RELEASE_TAG=${params.RELEASE_TAG})" }
   }
 }
