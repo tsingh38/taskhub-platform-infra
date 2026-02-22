@@ -1,9 +1,7 @@
 pipeline {
   agent any
 
-  options {
-    disableConcurrentBuilds()
-  }
+  options { disableConcurrentBuilds() }
 
   parameters {
     string(
@@ -42,14 +40,21 @@ pipeline {
             error("RELEASE_TAG is required for PROD deploy.")
           }
 
-          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '')
-          if (!(branch == 'main' || branch == 'origin/main')) {
+          def branch = (env.BRANCH_NAME ?: env.GIT_BRANCH ?: '').trim()
+          def ok = (branch == 'main' || branch == 'origin/main' || branch.endsWith('/main'))
+          if (!ok) {
             error("PROD deploy must run from main. Current branch=${branch}")
           }
 
-          sh 'test -f "$KUBECONFIG"'
           echo "Deploying PROD: release=${env.RELEASE}, ns=${env.NAMESPACE}, tag=${params.RELEASE_TAG}"
         }
+
+        sh '''
+          set -eu
+          export KUBECONFIG="$KUBECONFIG"
+          test -f "$KUBECONFIG"
+          test -f "$WORKSPACE/$VALUES_PROD"
+        '''
       }
     }
 
@@ -62,11 +67,13 @@ pipeline {
         dir("${env.CHART_DIR}") {
           sh """
             set -eu
-            helm upgrade --install ${env.RELEASE} . \
-              -n ${env.NAMESPACE} --create-namespace \
-              -f ${env.WORKSPACE}/${env.VALUES_PROD} \
-              --set image.repository=${env.IMAGE_REPO} \
-              --set image.tag=${params.RELEASE_TAG.trim()} \
+            export KUBECONFIG="\$KUBECONFIG"
+
+            helm upgrade --install "${env.RELEASE}" . \\
+              -n "${env.NAMESPACE}" --create-namespace \\
+              -f "${env.WORKSPACE}/${env.VALUES_PROD}" \\
+              --set image.repository="${env.IMAGE_REPO}" \\
+              --set image.tag="${params.RELEASE_TAG.trim()}" \\
               --wait --timeout 7m --atomic
           """
         }
@@ -77,6 +84,8 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "PROD Pods:"
           kubectl -n prod get pods -o wide || true
           echo ""
