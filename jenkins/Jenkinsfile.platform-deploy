@@ -147,7 +147,7 @@ pipeline {
 
     stage('Post-Apply Checks') {
       steps {
-        sh '''
+        sh '''git comm
           set -eu
           export KUBECONFIG="$KUBECONFIG"
 
