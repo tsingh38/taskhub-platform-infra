@@ -1,0 +1,127 @@
+pipeline {
+  agent any
+
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+    skipDefaultCheckout(true)
+  }
+
+  parameters {
+    string(
+      name: 'RELEASE_TAG',
+      defaultValue: '',
+      description: 'Git tag + Docker tag to build/push (example: 0.1.1)'
+    )
+  }
+
+  environment {
+    REGISTRY = "tsingh38"
+    IMAGE_NAME = "taskhub"
+    DOCKERHUB_CREDENTIALS = "dockerhub-tsingh38-taskhub"
+    TRIVY_CACHE_DIR = "/var/lib/jenkins/.cache/trivy"
+  }
+
+  stages {
+
+    stage('Validate') {
+      steps {
+        script {
+          if (!params.RELEASE_TAG?.trim()) {
+            error("RELEASE_TAG is required (example: 0.1.1)")
+          }
+          env.RELEASE_TAG = params.RELEASE_TAG.trim()
+          env.IMAGE = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.RELEASE_TAG}"
+          echo "Building RELEASE image: ${env.IMAGE}"
+        }
+      }
+    }
+
+    stage('Checkout tag') {
+      steps {
+        checkout scm
+        sh """#!/bin/bash
+          set -euo pipefail
+          git fetch --tags --force
+          git checkout "refs/tags/${RELEASE_TAG}"
+          git rev-parse --short HEAD
+        """
+      }
+    }
+
+    stage('Build & Test') {
+      steps {
+        dir('services/task-service') {
+          sh '''#!/bin/bash
+            set -euo pipefail
+            chmod +x gradlew
+            ./gradlew clean test
+          '''
+        }
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'services/task-service/build/test-results/test/*.xml'
+          archiveArtifacts artifacts: 'services/task-service/build/reports/tests/test/**', allowEmptyArchive: true
+        }
+      }
+    }
+
+    stage('Docker Build & Push') {
+      steps {
+        dir('services/task-service') {
+          withCredentials([usernamePassword(
+            credentialsId: DOCKERHUB_CREDENTIALS,
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+          )]) {
+            sh """#!/bin/bash
+              set -euo pipefail
+              echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+              docker build -t "${IMAGE}" .
+              docker push "${IMAGE}"
+              echo "Pushed: ${IMAGE}"
+            """
+          }
+        }
+      }
+    }
+
+    stage('Trivy Scan (HIGH/CRITICAL gate)') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: DOCKERHUB_CREDENTIALS,
+          usernameVariable: 'DOCKER_USER',
+          passwordVariable: 'DOCKER_PASS'
+        )]) {
+          sh """#!/bin/bash
+            set -euo pipefail
+            mkdir -p "${TRIVY_CACHE_DIR}"
+            docker run --rm \
+              -v "${TRIVY_CACHE_DIR}:/root/.cache/" \
+              -v "${WORKSPACE}:/work" \
+              aquasec/trivy:latest \
+              image \
+              --timeout 5m \
+              --no-progress \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --format json \
+              -o /work/trivy-report.json \
+              --username "\$DOCKER_USER" \
+              --password "\$DOCKER_PASS" \
+              "${IMAGE}"
+          """
+        }
+      }
+      post {
+        always { archiveArtifacts artifacts: 'trivy-report.json', fingerprint: true, onlyIfSuccessful: false }
+      }
+    }
+  }
+
+  post {
+    success { echo "RELEASE BUILD SUCCESS: ${IMAGE}" }
+    failure { echo "RELEASE BUILD FAILED" }
+  }
+}
