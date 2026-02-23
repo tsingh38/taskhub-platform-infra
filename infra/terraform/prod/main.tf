@@ -84,3 +84,14 @@ resource "helm_release" "task_service_prod" {
     helm_release.postgres_prod
   ]
 }
+
+# --- ServiceMonitor for task-service (PROD) ---
+resource "kubernetes_manifest" "task_service_servicemonitor_prod" {
+  manifest = yamldecode(
+    file("${path.module}/../../monitoring/servicemonitors/task-service-prod.yaml")
+  )
+
+  depends_on = [
+    helm_release.task_service_prod
+  ]
+}

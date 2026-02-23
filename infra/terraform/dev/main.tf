@@ -85,3 +85,15 @@ resource "helm_release" "task_service_dev" {
     helm_release.postgres_dev
   ]
 }
+
+# ServiceMonitor (DEV) - raw manifest applied via Terraform
+
+resource "kubernetes_manifest" "task_service_servicemonitor_dev" {
+  manifest = yamldecode(
+   file("${path.module}/../../monitoring/servicemonitors/task-service-dev.yaml")
+  )
+
+  depends_on = [
+    helm_release.task_service_dev
+  ]
+}

@@ -12,6 +12,11 @@ pipeline {
       defaultValue: false,
       description: 'Safety switch: must be TRUE to run Terraform apply.'
     )
+    booleanParam(
+      name: 'CONFIRM_PROD',
+      defaultValue: false,
+      description: 'Required when TARGET=prod'
+    )
     choice(
       name: 'TARGET',
       choices: ['monitoring', 'dev', 'prod'],
@@ -35,10 +40,14 @@ pipeline {
           if (!params.CONFIRM_APPLY) {
             error("Apply blocked. Tick CONFIRM_APPLY=true.")
           }
+          if (params.TARGET == 'prod' && !params.CONFIRM_PROD) {
+            error("Blocked: set CONFIRM_PROD=true to apply PROD.")
+          }
           echo "Platform apply TARGET=${params.TARGET}"
         }
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
           test -f "$KUBECONFIG"
         '''
       }
@@ -48,6 +57,23 @@ pipeline {
       steps { checkout scm }
     }
 
+    stage('Precheck: Prometheus CRDs') {
+      when { expression { return params.TARGET == 'dev' || params.TARGET == 'prod' } }
+      steps {
+        sh '''
+          set -eu
+          export KUBECONFIG="$KUBECONFIG"
+          echo "Checking ServiceMonitor CRD exists..."
+          kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 || {
+            echo "ERROR: ServiceMonitor CRD not found."
+            echo "Run platform deploy with TARGET=monitoring first (installs Prometheus Operator / CRDs)."
+            exit 1
+          }
+          echo "OK: ServiceMonitor CRD exists."
+        '''
+      }
+    }
+
     stage('Terraform Apply (Monitoring)') {
       when { expression { return params.TARGET == 'monitoring' } }
       steps {
@@ -55,6 +81,7 @@ pipeline {
           withCredentials([string(credentialsId: 'slack-webhook-url', variable: 'SLACK_WEBHOOK')]) {
             sh '''
               set -eu
+              export KUBECONFIG="$KUBECONFIG"
               mkdir -p "$(dirname "$TF_STATE_MONITORING")"
 
               export TF_VAR_kubeconfig_path="$KUBECONFIG"
@@ -78,6 +105,7 @@ pipeline {
           ]) {
             sh '''
               set -eu
+              export KUBECONFIG="$KUBECONFIG"
               mkdir -p "$(dirname "$TF_STATE_DEV")"
 
               export TF_VAR_kubeconfig_path="$KUBECONFIG"
@@ -102,6 +130,7 @@ pipeline {
           ]) {
             sh '''
               set -eu
+              export KUBECONFIG="$KUBECONFIG"
               mkdir -p "$(dirname "$TF_STATE_PROD")"
 
               export TF_VAR_kubeconfig_path="$KUBECONFIG"
@@ -120,6 +149,8 @@ pipeline {
       steps {
         sh '''
           set -eu
+          export KUBECONFIG="$KUBECONFIG"
+
           echo "Namespaces:"
           kubectl get ns | egrep 'dev|prod|monitoring' || true
           echo ""
