@@ -70,7 +70,7 @@ resource "kubernetes_manifest" "task_service_servicemonitor_prod" {
     file("${path.module}/../../monitoring/servicemonitors/task-service-prod.yaml")
   )
 
-  depends_on = [
-    helm_release.task_service_prod
-  ]
+   depends_on = [
+     kubernetes_namespace.prod
+   ]
 }

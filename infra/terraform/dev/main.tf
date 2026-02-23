@@ -73,6 +73,6 @@ resource "kubernetes_manifest" "task_service_servicemonitor_dev" {
   )
 
   depends_on = [
-    helm_release.task_service_dev
+    kubernetes_namespace.dev
   ]
 }
