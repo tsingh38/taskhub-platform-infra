@@ -65,27 +65,6 @@ resource "helm_release" "postgres_dev" {
   ]
 }
 
-resource "helm_release" "task_service_dev" {
-  name      = "task-service"
-  chart     = "../../helm/charts/task-service"
-  namespace = "dev"
-
-  values = [
-    file("../../helm/charts/task-service/values.yaml"),
-    file("../../helm/charts/task-service/values-dev.yaml")
-  ]
-
-  set {
-    name  = "image.tag"
-    value = var.app_version
-  }
-
-  depends_on = [
-    kubernetes_namespace.dev,
-    helm_release.postgres_dev
-  ]
-}
-
 # ServiceMonitor (DEV) - raw manifest applied via Terraform
 
 resource "kubernetes_manifest" "task_service_servicemonitor_dev" {

@@ -8,10 +8,6 @@ variable "postgres_image_tag" {
   default = "16.4.0-debian-12-r0"
 }
 
-variable "app_version" {
-  type        = string
-  description = "Managed by Jenkins (tag name for PROD)"
-}
 
 variable "db_user_prod" {
   type      = string

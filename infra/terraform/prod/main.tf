@@ -64,27 +64,6 @@ resource "helm_release" "postgres_prod" {
   ]
 }
 
-resource "helm_release" "task_service_prod" {
-  name      = "task-service"
-  chart     = "../../helm/charts/task-service"
-  namespace = "prod"
-
-  values = [
-    file("../../helm/charts/task-service/values.yaml"),
-    file("../../helm/charts/task-service/values-prod.yaml")
-  ]
-
-  set {
-    name  = "image.tag"
-    value = var.app_version
-  }
-
-  depends_on = [
-    kubernetes_namespace.prod,
-    helm_release.postgres_prod
-  ]
-}
-
 # --- ServiceMonitor for task-service (PROD) ---
 resource "kubernetes_manifest" "task_service_servicemonitor_prod" {
   manifest = yamldecode(
