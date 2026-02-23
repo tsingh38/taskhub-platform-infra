@@ -24,7 +24,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: pgdump
-              image: bitnami/postgresql:16.4.0-debian-12-r0
+              image: bitnamilegacy/postgresql:16.4.0-debian-12-r0
               imagePullPolicy: IfNotPresent
               env:
                 # Bitnami postgres chart creates this secret when auth.existingSecret=db-credentials
