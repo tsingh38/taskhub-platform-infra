@@ -36,12 +36,6 @@ pipeline {
 
     stage('Validate') {
       steps {
-        script {
-          if (!params.IMAGE_TAG?.trim()) {
-            error("IMAGE_TAG is required. Use KEEP_CURRENT to reuse the currently deployed tag.")
-          }
-        }
-
         sh '''#!/bin/bash
           set -euo pipefail
           test -f "$KUBECONFIG"
@@ -52,52 +46,62 @@ pipeline {
       }
     }
 
-stage('Resolve Effective Tag') {
-  steps {
-    script {
-      def requested = (params.IMAGE_TAG ?: '').trim()
+    stage('Resolve Effective Tag') {
+      steps {
+        script {
+          def requested = (params.IMAGE_TAG ?: '').trim()
 
-      // Treat empty the same as KEEP_CURRENT
-      if (requested && requested != "KEEP_CURRENT") {
-        env.EFFECTIVE_TAG = requested
-        echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (from parameter)"
-        return
+          // 1) If a real tag was provided, use it
+          if (requested && requested != "KEEP_CURRENT") {
+            env.EFFECTIVE_TAG = requested
+            echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (from parameter)"
+            return
+          }
+
+          // 2) KEEP_CURRENT (or empty) -> must resolve from cluster
+          def tag = sh(
+            script: """#!/bin/bash
+              set -uo pipefail
+              export KUBECONFIG="${env.KUBECONFIG}"
+
+              ns="${env.NAMESPACE}"
+              rel="${env.RELEASE}"
+
+              # First: ensure release exists, otherwise KEEP_CURRENT is impossible
+              if ! helm -n "\${ns}" status "\${rel}" >/dev/null 2>&1; then
+                echo "ERROR: Helm release '\${rel}' not found in namespace '\${ns}'."
+                echo "KEEP_CURRENT cannot work until you deploy at least once with a real IMAGE_TAG."
+                exit 2
+              fi
+
+              # Try Helm values (but NEVER fail the script if helm get values fails)
+              t=\$(helm -n "\${ns}" get values "\${rel}" -o yaml 2>/dev/null | awk '/^[[:space:]]*tag:/{print \$2; exit}' | tr -d '"' || true)
+              if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
+                echo "\${t}"
+                exit 0
+              fi
+
+              # Fallback: read current deployment image tag
+              img=\$(kubectl -n "\${ns}" get deploy "\${rel}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+              if [ -n "\${img}" ]; then
+                t=\$(echo "\${img}" | awk -F: '{print \$NF}')
+                if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
+                  echo "\${t}"
+                  exit 0
+                fi
+              fi
+
+              echo "ERROR: Could not resolve current image tag from Helm values or Deployment."
+              exit 3
+            """,
+            returnStdout: true
+          ).trim()
+
+          env.EFFECTIVE_TAG = tag
+          echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (resolved from running release)"
+        }
       }
-
-      // KEEP_CURRENT (or empty) -> resolve from cluster
-      def tag = sh(
-        script: """#!/bin/bash
-          set -euo pipefail
-          export KUBECONFIG="${env.KUBECONFIG}"
-
-          # 1) Prefer Helm values
-          t=\$(helm -n "${env.NAMESPACE}" get values "${env.RELEASE}" -o yaml 2>/dev/null | awk '/^[[:space:]]*tag:/{print \$2; exit}' | tr -d '"')
-          if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
-            echo "\${t}"
-            exit 0
-          fi
-
-          # 2) Fallback: parse live Deployment image
-          t=\$(kubectl -n "${env.NAMESPACE}" get deploy "${env.RELEASE}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | awk -F: '{print \$NF}')
-          if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
-            echo "\${t}"
-            exit 0
-          fi
-
-          exit 1
-        """,
-        returnStdout: true
-      ).trim()
-
-      if (!tag) {
-        error("KEEP_CURRENT requested, but could not resolve current image tag from Helm values or Deployment.")
-      }
-
-      env.EFFECTIVE_TAG = tag
-      echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (resolved from running release)"
     }
-  }
-}
 
     stage('Helm Upgrade DEV (task-service)') {
       steps {
