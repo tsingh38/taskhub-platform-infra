@@ -52,49 +52,52 @@ pipeline {
       }
     }
 
-    stage('Resolve Effective Tag') {
-      steps {
-        script {
-          if (params.IMAGE_TAG.trim() != "KEEP_CURRENT") {
-            env.EFFECTIVE_TAG = params.IMAGE_TAG.trim()
-            echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (from parameter)"
-            return
-          }
+stage('Resolve Effective Tag') {
+  steps {
+    script {
+      def requested = (params.IMAGE_TAG ?: '').trim()
 
-          // KEEP_CURRENT -> read currently deployed tag from Helm release values
-          def tag = sh(
-            script: """#!/bin/bash
-              set -euo pipefail
-              export KUBECONFIG="${env.KUBECONFIG}"
-
-              # 1) Prefer Helm values (what we previously set during deployments)
-              t=\$(helm -n "${env.NAMESPACE}" get values "${env.RELEASE}" -o yaml 2>/dev/null | awk '/^[[:space:]]*tag:/{print \$2; exit}' | tr -d '"')
-              if [ -n "\${t}" ]; then
-                echo "\${t}"
-                exit 0
-              fi
-
-              # 2) Fallback: parse live Deployment image
-              t=\$(kubectl -n "${env.NAMESPACE}" get deploy "${env.RELEASE}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | awk -F: '{print \$NF}')
-              if [ -n "\${t}" ]; then
-                echo "\${t}"
-                exit 0
-              fi
-
-              exit 1
-            """,
-            returnStdout: true
-          ).trim()
-
-          if (!tag) {
-            error("KEEP_CURRENT requested, but could not resolve current image tag from Helm values or Deployment.")
-          }
-
-          env.EFFECTIVE_TAG = tag
-          echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (resolved from running release)"
-        }
+      // Treat empty the same as KEEP_CURRENT
+      if (requested && requested != "KEEP_CURRENT") {
+        env.EFFECTIVE_TAG = requested
+        echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (from parameter)"
+        return
       }
+
+      // KEEP_CURRENT (or empty) -> resolve from cluster
+      def tag = sh(
+        script: """#!/bin/bash
+          set -euo pipefail
+          export KUBECONFIG="${env.KUBECONFIG}"
+
+          # 1) Prefer Helm values
+          t=\$(helm -n "${env.NAMESPACE}" get values "${env.RELEASE}" -o yaml 2>/dev/null | awk '/^[[:space:]]*tag:/{print \$2; exit}' | tr -d '"')
+          if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
+            echo "\${t}"
+            exit 0
+          fi
+
+          # 2) Fallback: parse live Deployment image
+          t=\$(kubectl -n "${env.NAMESPACE}" get deploy "${env.RELEASE}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | awk -F: '{print \$NF}')
+          if [ -n "\${t}" ] && [ "\${t}" != "null" ]; then
+            echo "\${t}"
+            exit 0
+          fi
+
+          exit 1
+        """,
+        returnStdout: true
+      ).trim()
+
+      if (!tag) {
+        error("KEEP_CURRENT requested, but could not resolve current image tag from Helm values or Deployment.")
+      }
+
+      env.EFFECTIVE_TAG = tag
+      echo "EFFECTIVE_TAG=${env.EFFECTIVE_TAG} (resolved from running release)"
     }
+  }
+}
 
     stage('Helm Upgrade DEV (task-service)') {
       steps {
