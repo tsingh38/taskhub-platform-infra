@@ -150,3 +150,79 @@ ServiceMonitor manifests:
 5. App deployments:
     - DEV: via `taskhub-app-ci` (auto) or `taskhub-deploy-dev` (manual)
     - PROD: manual via `taskhub-deploy-prod` with a valid Docker tag
+
+---
+
+## Disaster Recovery (DR)
+
+This project includes a **minimal, demoable** DR story covering:
+1) **Database backups** (scheduled)
+2) **Database restore** (manual procedure)
+3) **Rollback** of a bad application release/config
+4) **Reprovision** of platform resources via IaC
+
+### 1) Postgres backups (scheduled CronJob)
+
+A Kubernetes **CronJob** runs in each namespace (`dev` / `prod`) and performs a logical backup using `pg_dump`.
+
+What it creates:
+- **PVC**: `postgres-backups` (stores dump files)
+- **CronJob**: `postgres-backup`
+- Backup file format: `taskdb_<timestamp>.dump`
+
+How to verify:
+
+```bash
+# DEV
+kubectl -n dev  get pvc postgres-backups
+kubectl -n dev  get cronjob postgres-backup
+kubectl -n dev  get jobs --sort-by=.metadata.creationTimestamp | tail
+
+# PROD
+kubectl -n prod get pvc postgres-backups
+kubectl -n prod get cronjob postgres-backup
+kubectl -n prod get jobs --sort-by=.metadata.creationTimestamp | tail
+```
+
+Trigger an on-demand backup:
+
+```bash
+kubectl -n dev  create job --from=cronjob/postgres-backup postgres-backup-manual-$(date +%s)
+kubectl -n prod create job --from=cronjob/postgres-backup postgres-backup-manual-$(date +%s)
+```
+
+> Notes:
+> - `pg_dump` produces a consistent logical backup.
+> - Dumps are stored on the backup PVC to survive pod restarts.
+
+### 2) Restore procedure (manual)
+
+Restore uses `pg_restore` to load a selected dump file back into Postgres.
+
+High-level steps:
+1. Identify the dump file under `/backups/` on the backup PVC
+2. Restore into `taskdb` using `pg_restore`
+3. Verify with a simple query (e.g., table row count)
+
+*(Same steps apply for DEV and PROD — only the namespace/service DNS differs.)*
+
+### 3) Rollback a bad application release
+
+**DEV rollback**
+- Re-run `taskhub-deploy-dev` with:
+  - a known-good `IMAGE_TAG`
+
+**PROD rollback**
+- Re-run `taskhub-deploy-prod` with:
+  - `CONFIRM_PROD=true`
+  - `RELEASE_TAG=<previous known-good docker tag>`
+
+### 4) Reprovision platform resources (IaC)
+
+If the cluster/node is rebuilt or namespaces/resources are lost:
+1. Ensure prerequisites exist (k3s/kubectl, helm, terraform, Jenkins)
+2. Re-run `taskhub-platform-deploy` in order:
+   - `TARGET=monitoring`, then `dev`, then `prod`
+3. Redeploy the application:
+   - DEV auto via CI
+   - PROD manual via `taskhub-deploy-prod`
