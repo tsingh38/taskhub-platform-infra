@@ -1,0 +1,61 @@
+# dr/prod/postgres-backup-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: prod
+  labels:
+    app: taskhub
+    component: postgres-backup
+spec:
+  schedule: "0 2 * * *" # daily 02:00
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: taskhub
+            component: postgres-backup
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pgdump
+              image: bitnami/postgresql:16.4.0-debian-12-r0
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PGHOST
+                  value: "postgres-postgresql.prod.svc.cluster.local"
+                - name: PGPORT
+                  value: "5432"
+                - name: PGDATABASE
+                  value: "taskdb"
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-credentials
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: db-credentials
+                      key: password
+              command: ["/bin/bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  TS="$(date +%F_%H-%M-%S)"
+                  OUT="/backups/taskdb_${TS}.dump"
+                  echo "Starting backup: ${OUT}"
+                  pg_dump -Fc -f "${OUT}"
+                  ls -lah /backups | tail -n +1
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: postgres-backups

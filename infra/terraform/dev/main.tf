@@ -75,4 +75,17 @@ resource "kubernetes_manifest" "task_service_servicemonitor_dev" {
   depends_on = [
     kubernetes_namespace.dev
   ]
+
+}
+
+resource "kubernetes_manifest" "postgres_backups_pvc_dev" {
+  manifest = yamldecode(file("${path.module}/../../dr/dev/postgres-backup-pvc.yaml"))
+}
+
+resource "kubernetes_manifest" "postgres_backup_cronjob_dev" {
+  manifest = yamldecode(file("${path.module}/../../dr/dev/postgres-backup-cronjob.yaml"))
+
+  depends_on = [
+    kubernetes_manifest.postgres_backups_pvc_dev,helm_release.postgres_dev
+  ]
 }
