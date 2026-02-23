@@ -85,6 +85,11 @@ resource "kubernetes_manifest" "postgres_backups_pvc_dev" {
 resource "kubernetes_manifest" "postgres_backup_cronjob_dev" {
   manifest = yamldecode(file("${path.module}/../../dr/dev/postgres-backup-cronjob.yaml"))
 
+  field_manager {
+    name            = "terraform"
+    force_conflicts = true
+  }
+
   depends_on = [
     kubernetes_manifest.postgres_backups_pvc_dev,helm_release.postgres_dev
   ]
