@@ -30,7 +30,7 @@ resource "helm_release" "postgres_prod" {
   version    = var.postgres_chart_version
 
   values = [
-    file("../../helm/values/postgres/values.prod.yaml")
+    file("../../helm/values/postgres/values-prod.yaml")
   ]
 
   set {
