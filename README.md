@@ -15,10 +15,11 @@ This repository contains the **Kubernetes platform + deployments** for TaskHub:
 
 The platform is operated via Jenkins jobs with clear separation of responsibilities:
 
-- **App CI (in TaskHub App repo)** builds/tests the application, publishes the Docker image, scans it (Trivy), then triggers a DEV deploy using the produced image tag.
-- **Infra jobs (in this repo)** deploy the application and provision platform resources.
+- **App CI (`taskhub-app-ci`)** builds/tests the application, publishes the Docker image, runs a Trivy scan gate, then triggers **DEV deploy** using the produced image tag.
+- **Release build (`taskhub-release-build`)** is **manual** and builds/tests/pushes a **versioned Docker tag** (e.g., `0.1.2`) for PROD deployments.
+- **Infra jobs (this repo)** deploy the application (Helm) and provision platform resources (Terraform).
 
-![Jenkins Pipelines](docs/architecture/jenkins_pipelines.png)
+![Jenkins Pipelines](docs/architecture/overview.png)
 
 
 ### 2) Kubernetes architecture (3 namespaces)
@@ -56,8 +57,10 @@ All jobs are in Jenkins folder: **Taskhub-Platform**
 
 | Job | Trigger | What it does |
 |---|---|---|
+| `taskhub-app-ci` | push to `develop` | Build + test + Docker build/push + Trivy gate, then triggers `taskhub-deploy-dev` with the produced image tag |
+| `taskhub-release-build` | manual (tag-driven) | Builds + tests + Docker build/push for a **release tag** (e.g. `0.1.2`) so the tag exists in Docker Hub |
 | `taskhub-deploy-dev` | automated or manual | Helm deploy/upgrade `task-service` in `dev` |
-| `taskhub-deploy-prod` | manual only | Helm deploy/upgrade `task-service` in `prod` (explicit confirmation) |
+| `taskhub-deploy-prod` | manual only | Helm deploy/upgrade `task-service` in `prod` (explicit confirmation + release tag) |
 | `taskhub-platform-deploy` | manual | Terraform apply for `monitoring`, `dev`, or `prod` |
 
 ---
@@ -102,6 +105,7 @@ Helm inputs:
 Parameters:
 - `CONFIRM_PROD=true`
 - `RELEASE_TAG=<docker-tag>`
+- Prerequisite: the Docker image tag must already exist in Docker Hub (typically created by `taskhub-release-build`).
 
 Helm inputs:
 - Chart: `infra/helm/charts/task-service`
@@ -197,14 +201,24 @@ kubectl -n prod create job --from=cronjob/postgres-backup postgres-backup-manual
 
 ### 2) Restore procedure (manual)
 
-Restore uses `pg_restore` to load a selected dump file back into Postgres.
+Restore loads a selected dump file back into Postgres using `pg_restore`.
 
-High-level steps:
-1. Identify the dump file under `/backups/` on the backup PVC
-2. Restore into `taskdb` using `pg_restore`
-3. Verify with a simple query (e.g., table row count)
+1. **Pick a dump file** from the backup PVC (created by the CronJob).
+2. **Run a one-off restore pod** (mounts `postgres-backups` PVC) and execute `pg_restore`.
+3. **Verify** using a simple query.
 
-*(Same steps apply for DEV and PROD — only the namespace/service DNS differs.)*
+Example (DEV):
+```bash
+# Start a restore pod with the backups PVC mounted
+kubectl -n dev run pg-restore --rm -it --restart=Never \
+  --image=bitnamilegacy/postgresql:16.4.0-debian-12-r0 \
+  --overrides='{"spec":{"volumes":[{"name":"backups","persistentVolumeClaim":{"claimName":"postgres-backups"}}],"containers":[{"name":"pg","image":"bitnamilegacy/postgresql:16.4.0-debian-12-r0","command":["bash","-lc"],"args":["ls -lah /backups && echo '---' && pg_restore -Fc -d taskdb /backups/<YOUR_DUMP_FILE>.dump"],"env":[{"name":"PGHOST","value":"postgres-postgresql.dev.svc.cluster.local"},{"name":"PGPORT","value":"5432"},{"name":"PGDATABASE","value":"taskdb"},{"name":"PGUSER","valueFrom":{"secretKeyRef":{"name":"db-credentials","key":"username"}}},{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"db-credentials","key":"password"}}}],"volumeMounts":[{"name":"backups","mountPath":"/backups"}]}],"restartPolicy":"Never"}}'
+
+# Verify (example)
+kubectl -n dev exec -it postgres-postgresql-0 -- psql -U "$POSTGRES_USER" -d taskdb -c "SELECT count(*) FROM tasks;" || true
+```
+
+> Same steps apply for PROD by switching `-n prod` and using `postgres-postgresql.prod.svc.cluster.local`.
 
 ### 3) Rollback a bad application release
 
@@ -216,6 +230,7 @@ High-level steps:
 - Re-run `taskhub-deploy-prod` with:
   - `CONFIRM_PROD=true`
   - `RELEASE_TAG=<previous known-good docker tag>`
+- Optional (CLI): `helm -n prod rollback task-service <REVISION>`
 
 ### 4) Reprovision platform resources (IaC)
 
