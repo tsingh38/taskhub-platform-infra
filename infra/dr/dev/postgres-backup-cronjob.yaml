@@ -43,10 +43,11 @@ spec:
                     secretKeyRef:
                       name: db-credentials
                       key: password
-              command: ["/bin/bash", "-lc"]
+              command: [ "/bin/bash", "-lc" ]
               args:
                 - |
                   set -euo pipefail
+                  export PATH="/opt/bitnami/postgresql/bin:$PATH"
                   TS="$(date +%F_%H-%M-%S)"
                   OUT="/backups/taskdb_${TS}.dump"
                   echo "Starting backup: ${OUT}"
